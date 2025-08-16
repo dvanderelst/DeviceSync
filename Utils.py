@@ -27,7 +27,7 @@ def select_project():
 
         confirm = input("\nConfirm selection? [Y/n]: ").strip().lower()
         if confirm in ('', 'y', 'yes'):
-            return project_name, origin, target
+            return project_name, PROJECTS[project_name]
         else:
             print("\n↩️  Going back to selection...\n")
 
@@ -43,3 +43,6 @@ def check_folders_exist(origin, target):
 
     return origin_exists and target_exists
 
+
+def parse_exclusion_string(value):
+    return set(s.strip() for s in value.split(",") if s.strip())
