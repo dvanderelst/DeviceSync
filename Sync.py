@@ -10,8 +10,13 @@ def sync_loop(origin, target, excluded_folders=None, excluded_files=None, interv
         while True:
             print("[🔁] Checking for changes...")
             files_copied = copy_updated_files(origin, target)
-            files_deleted, dirs_deleted = remove_deleted_files(origin, target, excluded_folders, excluded_files)
-
+            # check whether origin can still be accessed
+            # if not, skip deletion step
+            if Path(origin).exists():
+                files_deleted, dirs_deleted = remove_deleted_files(origin, target, excluded_folders, excluded_files)
+            else:
+                print(f"[⚠] Origin folder not accessible. Skipping deletion step.")
+                files_deleted, dirs_deleted = 0, 0
             print(f"[✔] {files_copied} copied, {files_deleted} deleted, {dirs_deleted} dirs removed.")
             time.sleep(interval)
     except KeyboardInterrupt:
