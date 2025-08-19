@@ -1,149 +1,140 @@
+# Sync.py
+# Wrapper around rsync to copy updates from temp -> backup,
+# honoring ignores and keeping deleted/overwritten files in a trash folder.
+
 import os
 import shutil
-import time
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
+# Optional: pull defaults from your Config if present
+try:
+    import Config  # noqa: F401
+    _CFG = {
+        "trash_folder": getattr(Config, "trash_folder", ".trash"),
+        "exclude_hidden": bool(getattr(Config, "exclude_hidden", False)),
+        "excluded_folders": list(getattr(Config, "excluded_folders", []) or []),
+        "excluded_files": list(getattr(Config, "excluded_files", []) or []),
+        "use_hash": bool(getattr(Config, "use_hash", False)),  # maps to --checksum
+    }
+except Exception:
+    _CFG = {
+        "trash_folder": ".trash",
+        "exclude_hidden": False,
+        "excluded_folders": [],
+        "excluded_files": [],
+        "use_hash": False,
+    }
 
-def sync_loop(origin, target, excluded_folders=None, excluded_files=None, interval=5):
-    print(f"\n[✓] Syncing every {interval} seconds. Press Ctrl+C to stop.\n")
-    try:
-        while True:
-            print("[🔁] Checking for changes...")
-            # check whether origin can still be accessed
-            if Path(origin).exists():
-                files_copied = copy_updated_files(origin, target)
-                files_deleted, dirs_deleted = remove_deleted_files(origin, target, excluded_folders, excluded_files)
-            else:
-                print(f"[⚠] Origin folder not accessible.")
-                files_copied = 0
-                files_deleted, dirs_deleted = 0, 0
-            print(f"[✔] {files_copied} copied, {files_deleted} deleted, {dirs_deleted} dirs removed.")
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        print("\n[✋] Sync stopped by user.")
-
-
-def copy_updated_files(origin, target, exclude_hidden=True):
-    origin = Path(origin)
-    target = Path(target)
-
-    files_copied = 0
-
-    for root, dirs, files in os.walk(origin):
-        rel_root = Path(root).relative_to(origin)
-        target_root = target / rel_root
-        target_root.mkdir(parents=True, exist_ok=True)
-
-        for name in files:
-            if exclude_hidden and name.startswith("."):
-                continue
-
-            origin_file = Path(root) / name
-            target_file = target_root / name
-
-            try:
-                if not target_file.exists() or os.path.getmtime(origin_file) > os.path.getmtime(target_file):
-                    shutil.copy2(origin_file, target_file)
-                    print(f"[→] {origin_file.relative_to(origin)}")
-                    files_copied += 1
-            except Exception as e:
-                print(f"[!] Failed to copy {origin_file}: {e}")
-
-    return files_copied
-
-
-def remove_deleted_files(
-    origin,
-    target,
-    excluded_folders=None,
-    excluded_files=None,
-    exclude_hidden=True,
-    trash_folder=".sync_trash"
-):
+def rsync_update(temp_dir: str,
+                 backup_dir: str,
+                 ignore_dirs=None,
+                 ignore_files=None,
+                 exclude_hidden=None,
+                 checksum=None,
+                 dry_run: bool = False,
+                 progress: bool = True) -> str:
     """
-    Removes files and folders in `target` that no longer exist in `origin`.
-    Instead of deleting them, moves them to a .sync_trash folder in `target`.
+    Sync temp_dir -> backup_dir using rsync, keeping deletions/overwrites in a trash bucket.
 
     Args:
-        origin (str or Path): Origin folder to compare against.
-        target (str or Path): Target folder to clean.
-        excluded_folders (list): Folder names in target to skip (e.g., ['.idea']).
-        excluded_files (list): File names in target to skip (e.g., ['README.md']).
-        exclude_hidden (bool): Whether to skip hidden files/folders (and their contents).
-        trash_folder (str): Folder in `target` where deletions are stored.
+        temp_dir: source (its *contents* are copied; trailing slash enforced)
+        backup_dir: destination directory
+        ignore_dirs: list of directory patterns to exclude (match anywhere), e.g. ["build", "node_modules"]
+        ignore_files: list of file patterns to exclude (match anywhere), e.g. [".DS_Store", "*.tmp"]
+        exclude_hidden: if True, exclude dotfiles/dirs anywhere ('.*' and '*/.*'); defaults to Config or False
+        checksum: if True, use --checksum (content hashing). Defaults to Config.use_hash or False
+        dry_run: if True, add -n (no changes), print what would happen
+        progress: if True, print rsync progress/stats
+
+    Returns:
+        The path to the trash bucket used for this run.
     """
-    origin = Path(origin)
-    target = Path(target)
-    trash = target / trash_folder
-    trash.mkdir(parents=True, exist_ok=True)
+    if shutil.which("rsync") is None:
+        raise RuntimeError("rsync not found on PATH. Please install rsync.")
 
-    if excluded_folders is None:
-        excluded_folders = []
-    if excluded_files is None:
-        excluded_files = []
+    src = str(Path(temp_dir).resolve()) + "/"   # copy contents
+    dst = str(Path(backup_dir).resolve())       # target dir
 
-    excluded_folder_set = set(excluded_folders) | {trash_folder}
-    excluded_file_set = set(excluded_files)
+    # Defaults (Config fallback)
+    if exclude_hidden is None:
+        exclude_hidden = _CFG["exclude_hidden"]
+    if checksum is None:
+        checksum = _CFG["use_hash"]
 
-    files_moved = 0
-    dirs_moved = 0
+    # Ignores (merge with Config)
+    ignore_dirs = list((_CFG["excluded_folders"] or [])) + list(ignore_dirs or [])
+    ignore_files = list((_CFG["excluded_files"] or [])) + list(ignore_files or [])
 
-    for root, dirs, files in os.walk(target, topdown=False):
-        rel_root = Path(root).relative_to(target)
+    # Trash bucket (timestamped)
+    trash_root = Path(dst, _CFG["trash_folder"])
+    trash_bucket = trash_root / datetime.now().strftime("%Y%m%d-%H%M%S")
+    trash_bucket.parent.mkdir(parents=True, exist_ok=True)  # ensure .trash exists
 
-        # ⛔ Skip entire folder tree if any part is hidden or excluded
-        if (
-            (exclude_hidden and any(part.startswith(".") for part in rel_root.parts)) or
-            (rel_root.parts and rel_root.parts[0] in excluded_folder_set)
-        ):
-            print(f"[⏩] Skipping hidden or excluded path: {rel_root}")
-            continue
+    # Build rsync command
+    cmd = ["rsync", "-aHAX", "--delete", "--backup", f"--backup-dir={str(trash_bucket)}"]
 
-        origin_root = origin / rel_root
+    # Safer output verbosity
+    if progress:
+        cmd += ["--itemize-changes", "--info=stats2,progress2"]
 
-        # Move deleted files to trash
-        for name in files:
-            if name in excluded_file_set:
-                print(f"[⏩] Skipping excluded file: {Path(root) / name}")
-                continue
-            if exclude_hidden and name.startswith("."):
-                print(f"[⏩] Skipping hidden file: {Path(root) / name}")
-                continue
+    # Exclude the trash folder itself (protect from --delete)
+    cmd += [f"--exclude=/{_CFG['trash_folder']}/**"]
 
-            target_file = Path(root) / name
-            origin_file = origin_root / name
+    # Exclude hidden files/dirs anywhere
+    if exclude_hidden:
+        cmd += ["--exclude=.*", "--exclude=*/.*"]
 
-            if not origin_file.exists():
-                rel_path = target_file.relative_to(target)
-                trash_path = trash / rel_path
-                trash_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    shutil.move(str(target_file), str(trash_path))
-                    print(f"[🗑] Moved to trash: {rel_path}")
-                    files_moved += 1
-                except Exception as e:
-                    print(f"[!] Failed to move {target_file}: {e}")
+    # Exclude directory patterns (match anywhere)
+    for d in ignore_dirs:
+        # Exclude both the dir itself and its subtree anywhere it appears
+        cmd += [f"--exclude={d}", f"--exclude={d}/**"]
 
-        # Move deleted folders to trash
-        for name in dirs:
-            if name in excluded_folder_set:
-                print(f"[⏩] Skipping excluded folder: {Path(root) / name}")
-                continue
-            if exclude_hidden and name.startswith("."):
-                print(f"[⏩] Skipping hidden folder: {Path(root) / name}")
-                continue
+    # Exclude file patterns (match anywhere; glob patterns allowed)
+    for f in ignore_files:
+        cmd += [f"--exclude={f}"]
 
-            target_dir = Path(root) / name
-            origin_dir = origin_root / name
+    # Content checksum mode (slower; reads both sides)
+    if checksum:
+        cmd.append("--checksum")
 
-            if not origin_dir.exists():
-                rel_path = target_dir.relative_to(target)
-                trash_path = trash / rel_path
-                try:
-                    shutil.move(str(target_dir), str(trash_path))
-                    print(f"[🗑] Moved folder to trash: {rel_path}/")
-                    dirs_moved += 1
-                except Exception as e:
-                    print(f"[!] Failed to move folder {target_dir}: {e}")
+    if dry_run:
+        cmd.append("-n")  # no changes, just report
 
-    return files_moved, dirs_moved
+    # Finally add endpoints
+    cmd += [src, dst]
+
+    # Print and run
+    print("[cmd]", " ".join(quote_arg(a) for a in cmd))
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"rsync failed with exit code {e.returncode}") from e
+
+    return str(trash_bucket)
+
+def quote_arg(a: str) -> str:
+    """Minimal shell-style quoting for transparency when printing commands."""
+    if any(c in a for c in " \t\n'\"*$[]?{}()|&;<>`\\"):
+        return "'" + a.replace("'", "'\\''") + "'"
+    return a
+
+# --- Convenience aliases (optional) ---
+
+def sync_temp_to_backup(temp_dir: str, backup_dir: str,
+                        ignore_dirs=None, ignore_files=None,
+                        dry_run: bool = False) -> str:
+    """
+    Opinionated defaults: exclude hidden, no checksum, progress on.
+    """
+    return rsync_update(
+        temp_dir=temp_dir,
+        backup_dir=backup_dir,
+        ignore_dirs=ignore_dirs,
+        ignore_files=ignore_files,
+        exclude_hidden=True,
+        checksum=False,
+        dry_run=dry_run,
+        progress=True,
+    )
