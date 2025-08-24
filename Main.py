@@ -45,20 +45,10 @@ while True:
     print("\n" + "=" * 60)
     print(time.asctime())
     print("Trying to mirror the board contents...")
-
     ok, out, err = Rshell.rshell_mirror(device, dest_folder=full_temp_folder, dry_run=False, quiet=False)
     if not ok:
         print(f"[WARN] Could not mirror: {err}")
     else:
-        # With ignores and dry-run check
-        trash_path = Sync.rsync_update(
-            temp_dir=full_temp_folder,
-            backup_dir=backup_folder,
-            ignore_dirs=["build", "node_modules", ".venv"],
-            ignore_files=[".DS_Store", "Thumbs.db", "*.tmp"],
-            exclude_hidden=True,
-            checksum=False,  # set True if you insist on hashing
-            dry_run=False  # preview first
-        )
-
-    time.sleep(10)
+        trash_path = Sync.rsync_update(temp_dir=full_temp_folder, backup_dir=backup_folder)
+    print('Done!')
+    input("Press Enter to repeat...")
