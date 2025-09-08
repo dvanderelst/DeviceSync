@@ -4,9 +4,9 @@
 
 
 PROJECTS = {
-    "3PI_robot": {
-        "origin": "/media/dieter/MicroPython",
-        "target": "/home/dieter/Dropbox/PythonRepos/3PiRobot/robot_code",
+    "HydraPurr TEST": {
+        "origin": "/media/dieter/CIRCUITPY",
+        "target": "/home/dieter/Desktop/TESTCP/source_backup",
         "excluded_folders": ".idea,__pycache__,.git",
         "excluded_files": "README.md,notes.txt"
     },
