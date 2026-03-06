@@ -1,6 +1,6 @@
-# MicroPython/CircuitPython Code Sync Tool
+# CircuitPython Code Sync Tool
 
-This is a lightweight tool to keep code on MicroPython or CircuitPython boards continuously synced to a local folder on your computer.
+This is a lightweight tool to keep code on CircuitPython boards continuously synced to a local folder on your computer.
 
 ## 🚀 Why?
 

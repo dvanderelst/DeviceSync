@@ -35,7 +35,6 @@ fi
 # Optional diagnostics (comment out once happy)
 echo "[debug] Activated env: $ENV_FOUND"
 echo "[debug] python:  $(command -v python)"
-echo "[debug] rshell:  $(command -v rshell)"
 
 # Run the app
 cd "$APP_DIR"
